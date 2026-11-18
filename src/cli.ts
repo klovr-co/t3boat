@@ -1,6 +1,6 @@
 // t3boat CLI: the same operations as the MCP tools, for testing and cron.
-//   t3boat create [--repo <url|none>] [--ref <ref>] [--idle <min>] [--ttl <min>] [--access <mode>]
-//   t3boat list | destroy <id> | exec <id> <command> | reap | doctor
+//   t3boat create [--repo <url|none>] [--ref <ref>] [--from <saved snapshot>] [--idle <min>] [--ttl <min>] [--access <mode>]
+//   t3boat list | destroy <id> | exec <id> <command> | snapshot <id> <name> | reap | doctor
 import { parseArgs } from "node:util";
 import { BoatClient } from "./boat.ts";
 import { SandboxManager } from "./sandboxes.ts";
@@ -13,6 +13,7 @@ const { positionals, values } = parseArgs({
     idle: { type: "string" },
     ttl: { type: "string" },
     access: { type: "string" },
+    from: { type: "string" },
     "keep-alive": { type: "boolean" },
   },
 });
@@ -46,6 +47,7 @@ switch (cmd) {
           idleMinutes: values.idle ? Number(values.idle) : undefined,
           ttlMinutes: values.ttl ? Number(values.ttl) : undefined,
           access: values.access as any,
+          fromSnapshot: values.from,
           keepAlive: values["keep-alive"],
         },
         log,
@@ -62,10 +64,13 @@ switch (cmd) {
   case "exec":
     print(await m.exec(rest[0]!, rest.slice(1).join(" "), 600));
     break;
+  case "snapshot":
+    print(await m.saveSnapshot(rest[0]!, rest[1]!, log));
+    break;
   case "reap":
     await m.reap(log);
     break;
   default:
-    log("usage: t3boat create|list|destroy <id>|exec <id> <cmd>|reap|doctor");
+    log("usage: t3boat create|list|destroy <id>|exec <id> <cmd>|snapshot <id> <name>|reap|doctor");
     process.exit(2);
 }

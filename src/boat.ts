@@ -115,6 +115,8 @@ export class BoatClient {
     labels?: Record<string, string>;
     env?: Record<string, string>;
     environment?: string;
+    /** Saved snapshot name to start from. */
+    from?: string;
     idempotencyKey: string;
   }): Promise<BoatSandbox> {
     const { idempotencyKey, ...body } = input;
@@ -195,6 +197,30 @@ export class BoatClient {
       if (!res.pageInfo?.hasMore) return out;
       cursor = res.pageInfo.nextCursor;
     }
+  }
+
+  /** Saves the sandbox disk under `name` and waits until boat reports it ready. Reusing a name replaces it. */
+  async saveSnapshot(sandboxId: string, name: string, timeoutMs = 15 * 60_000): Promise<void> {
+    await this.withRetry(() => this.request("POST", "/saved-snapshots", { sandboxId, name }));
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const res = await this.request("GET", `/saved-snapshots/${encodeURIComponent(name)}`);
+      const snapshot = res.savedSnapshot ?? res.snapshot ?? res;
+      if (snapshot.status === "ready") return;
+      if (snapshot.status === "failed") throw new Error(`saved snapshot ${name} failed: ${snapshot.error ?? "no reason given"}`);
+      if (Date.now() > deadline) throw new Error(`saved snapshot ${name} not ready after ${timeoutMs / 1000}s`);
+      await sleep(5_000);
+    }
+  }
+
+  /** Paths (relative to /home/user) of the secret files boat writes into new sandboxes of an environment. */
+  async secretFilePaths(environment?: string): Promise<string[]> {
+    const res = await this.request("GET", "/environments");
+    const envs: any[] = res.environments ?? [];
+    const env = environment ? envs.find((e) => e.name === environment || e.id === environment) : envs.find((e) => e.isDefault);
+    return (env?.secretFiles ?? [])
+      .map((f: any) => (typeof f === "string" ? f : f?.path))
+      .filter((p: unknown): p is string => typeof p === "string" && p.length > 0);
   }
 
   /** Permanently deletes the sandbox and its snapshots. */

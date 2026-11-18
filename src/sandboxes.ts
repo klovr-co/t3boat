@@ -16,13 +16,14 @@ import {
   installScript,
   pairingCommand,
   projectSetupCommand,
+  templateScript,
   shellQuote,
   startServerCommand,
   threadListCommand,
 } from "./bootstrap.ts";
 import { type LinkAccess, LocalT3 } from "./t3local.ts";
 
-export type Phase = "creating" | "installing" | "starting" | "linking" | "ready" | "destroying" | "failed";
+export type Phase = "creating" | "installing" | "starting" | "linking" | "ready" | "snapshotting" | "destroying" | "failed";
 
 export interface ManagedSandbox {
   sandboxId: string;
@@ -54,6 +55,8 @@ export interface CreateOptions {
   access?: LinkAccess;
   size?: "small" | "medium" | "large";
   boatEnvironment?: string;
+  /** Saved snapshot to start from (see saveSnapshot): T3, provider CLIs and installed dependencies are already there. */
+  fromSnapshot?: string;
   env?: Record<string, string>;
   keepAlive?: boolean;
 }
@@ -144,6 +147,7 @@ export class SandboxManager {
       ...(Object.keys(env).length ? { env } : {}),
       ...(opts.size ? { type: opts.size } : {}),
       ...(opts.boatEnvironment ? { environment: opts.boatEnvironment } : {}),
+      ...(opts.fromSnapshot ? { from: opts.fromSnapshot } : {}),
     });
 
     const s: ManagedSandbox = {
@@ -280,6 +284,33 @@ export class SandboxManager {
     return s;
   }
 
+  /**
+   * Saves a ready sandbox as a boat saved snapshot to start later sandboxes from, then deletes it. Install what the
+   * work needs on it first (for example the project's dependencies). Its T3 server state and the boat environment's
+   * secret files are removed before the save, so copies link as separate environments and hold no secrets.
+   */
+  async saveSnapshot(idOrEnv: string, name: string, progress: Progress = () => {}): Promise<{ name: string; from: string }> {
+    const s = this.find(idOrEnv);
+    if (!s) throw new Error(`no managed sandbox ${idOrEnv}`);
+    if (s.phase !== "ready") throw new Error(`sandbox ${s.name} is ${s.phase}, not ready`);
+    this.update(s, { phase: "snapshotting" });
+    try {
+      progress(`preparing ${s.name} as a template`);
+      const secretFiles = await this.boat.secretFilePaths();
+      await this.boat.writeFile(s.sandboxId, `${SCRIPT_DIR}/template.sh`, templateScript(secretFiles));
+      const r = await this.boat.exec(s.sandboxId, `bash ${SCRIPT_DIR}/template.sh 2>&1 | tail -20`, 120);
+      if (!/template ready/.test(r.stdout)) throw new Error(`template cleanup failed:\n${r.stdout}${r.stderr}`);
+      progress(`saving snapshot ${name}`);
+      await this.boat.saveSnapshot(s.sandboxId, name);
+    } catch (e) {
+      this.update(s, { phase: "failed", error: (e as Error).message });
+      throw e;
+    }
+    progress(`snapshot ${name} ready, deleting ${s.name}`);
+    await this.destroy(s.sandboxId);
+    return { name, from: s.name };
+  }
+
   async exec(idOrEnv: string, command: string, timeoutSeconds = 60) {
     const s = this.find(idOrEnv);
     if (!s) throw new Error(`no managed sandbox ${idOrEnv}`);
@@ -317,6 +348,7 @@ export class SandboxManager {
             log(`reaped ${s.name} (${s.phase})`);
             continue;
           }
+          if (s.phase === "snapshotting") continue;
           if (s.phase !== "ready") {
             if (minutesSince(s.createdAt) > 30) {
               await this.destroy(s.sandboxId);

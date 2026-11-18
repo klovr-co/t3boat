@@ -73,12 +73,22 @@ export const startServerCommand = `bash "$HOME/.t3boat/serve.sh"`;
 
 export const healthCommand = `curl -fsS -m 5 http://127.0.0.1:${T3_PORT}/.well-known/t3/environment`;
 
-/** Clones the repo (with the same origin URL as locally, so T3 matches the project by repository identity) and registers it. */
+/**
+ * Clones the repo (with the same origin URL as locally, so T3 matches the project by repository identity) and registers it.
+ * A clone already on the disk (a sandbox started from a saved snapshot) is fetched and moved to `ref` instead, keeping
+ * ignored files such as installed dependencies.
+ */
 export function projectSetupCommand(repo: string, ref: string | undefined, dir: string): string {
   const checkout = ref ? ` && git -C ${sh(dir)} checkout ${sh(ref)}` : "";
+  const target = ref ? sh(ref) : "HEAD";
+  const refresh = [
+    `git -C ${sh(dir)} fetch -q origin ${target}`,
+    `git -C ${sh(dir)} checkout -q -f --detach FETCH_HEAD`,
+    `git -C ${sh(dir)} clean -q -fd`,
+  ].join(" && ");
   return [
     `export PATH="$HOME/.local/bin:$PATH"`,
-    `if [ ! -d ${sh(dir)}/.git ]; then git clone ${sh(repo)} ${sh(dir)}${checkout}; fi`,
+    `if [ -d ${sh(dir)}/.git ]; then ${refresh}; else git clone ${sh(repo)} ${sh(dir)}${checkout}; fi`,
     // Prints "Added project <id> (<title>) at <path>."; an already-added path is not an error.
     `{ t3 project add ${sh(dir)} --base-dir "$HOME/.t3" 2>&1 || true; }`,
   ].join(" && ");
@@ -86,6 +96,27 @@ export function projectSetupCommand(repo: string, ref: string | undefined, dir: 
 
 export function pairingCommand(label: string): string {
   return `export PATH="$HOME/.local/bin:$PATH" && t3 auth pairing create --base-dir "$HOME/.t3" --json --ttl 10m --label ${sh(label)}`;
+}
+
+/**
+ * Turns a ready sandbox into a template for a saved snapshot: stops the T3 server, then removes everything that must
+ * not be shared between sandboxes started from it. T3's server state (the environment id, pairings, threads) would make
+ * every copy the same linked environment. Secret files come back from the boat environment at each start. The T3
+ * runtime, provider CLIs, clones and their installed dependencies stay.
+ */
+export function templateScript(secretFiles: string[]): string {
+  const secrets = secretFiles.map((p) => `rm -f "$HOME"/${sh(p.replace(/^\/+/, ""))}`).join("\n");
+  return `#!/usr/bin/env bash
+set -uo pipefail
+pkill -f "$HOME/.t3boat/serve.sh" || true
+pkill -f "t3 serve" || true
+for _ in $(seq 1 20); do pgrep -f "t3 serve" >/dev/null || break; sleep 0.5; done
+find "$HOME/.t3" -mindepth 1 -maxdepth 1 ! -name runtime -exec rm -rf {} +
+rm -f "$HOME/.t3boat/env" "$HOME/.t3boat/serve.log" "$HOME/.t3boat/serve.lock"
+rm -rf "$HOME/.claude/projects" "$HOME/.claude/sessions" "$HOME/.codex/sessions" "$HOME/.bash_history"
+${secrets}
+echo "template ready"
+`;
 }
 
 /** Thread statuses on the VM; busy ones keep the sandbox alive. */

@@ -61,7 +61,7 @@ export class LocalT3 {
 
   async version(): Promise<string> {
     const { stdout } = await run(this.cli, ["--version"], { timeout: 30_000 });
-    const m = stdout.match(/v?(\d+\.\d+\.\d+)/);
+    const m = stdout.match(/v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/);
     if (!m) throw new Error(`cannot parse t3 version from "${stdout.trim()}"`);
     return m[1];
   }
